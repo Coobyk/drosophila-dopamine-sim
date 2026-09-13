@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "drosophila-dopamine-sim"
+version = "0.1.0"
+description = "A runnable toy simulation of a Drosophila mushroom body dopamine circuit"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "matplotlib>=3.7",
+]
+
+[tool.setuptools.packages.find]
+include = ["drosophila_sim*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
