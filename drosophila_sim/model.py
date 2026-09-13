@@ -11,10 +11,13 @@ class SimulationConfig:
     dt: float = 0.08
     arena_size: float = 10.0
     visual_range: float = 7.0
-    dopamine_threshold: float = 0.82
+    dopamine_threshold: float = 0.45
     learning_rate: float = 0.018
     weight_decay: float = 0.0008
     seed: int = 7
+    # A gentle innate phototaxis term makes the default run a useful demonstration:
+    # the MB still controls locomotion and plasticity, but the fly explores toward salience.
+    phototaxis_gain: float = 0.22
 
 class VisualArena:
     def __init__(self, size: float, seed: int):
@@ -27,12 +30,13 @@ class VisualArena:
         self.distractor_descriptors /= np.linalg.norm(self.distractor_descriptors, axis=1, keepdims=True)
 
     def observe(self, position, heading, features=64):
-        """Return a view descriptor with a target-like signal near the target."""
+        """Return a noisy target descriptor, distance, and visual salience."""
         delta = self.target - position
         distance = np.linalg.norm(delta)
-        target_strength = np.exp(-distance / 2.0)
+        # The previous scale of 2.0 made similarity negligible until almost contact.
+        target_strength = np.exp(-distance / 4.0)
         rng = np.random.default_rng(int((position[0]*91 + position[1]*173 + heading*31)*1000) & 0xffffffff)
-        noise = rng.normal(0, .16, features)
+        noise = rng.normal(0, .05, features)
         view = target_strength * self.target_descriptor + noise
         return view / (np.linalg.norm(view) + 1e-9), distance, target_strength
 
@@ -56,22 +60,27 @@ class MushroomBodySimulation:
         # approach, left turn, right turn channels
         self.weights = self.rng.uniform(.15, .65, (3, self.cfg.n_kc))
         self.position = np.array([1.0, 1.0], dtype=float)
-        self.heading = .35
+        self.heading = float(np.arctan2(self.arena.target[1] - self.position[1], self.arena.target[0] - self.position[0]))
         self.history = {k: [] for k in ('position','heading','dopamine','similarity','distance','weight_mean','kc_active')}
 
     def step(self, t):
-        visual, distance, _ = self.arena.observe(self.position, self.heading, self.cfg.n_features)
+        visual, distance, target_strength = self.arena.observe(self.position, self.heading, self.cfg.n_features)
         similarity = float(np.dot(visual, self.arena.target_descriptor))
         dopamine = float(np.clip((similarity - self.cfg.dopamine_threshold) / (1-self.cfg.dopamine_threshold), 0, 1))
         kc_activity = self.kc.encode(visual)
         outputs = self.weights @ kc_activity
         forward = np.tanh(outputs[0] * 1.8)
-        turn = np.tanh((outputs[2] - outputs[1]) * 1.4)
-        # dopamine-gated LTD of active KC -> MBON synapses
+        mb_turn = np.tanh((outputs[2] - outputs[1]) * 1.4)
+        # Dopamine-gated LTD of active KC -> MBON synapses.
         ltd = self.cfg.learning_rate * dopamine * kc_activity
         self.weights = np.maximum(0.0, self.weights - ltd[None, :] * (0.5 + self.weights))
         self.weights *= (1.0 - self.cfg.weight_decay * dopamine)
-        self.heading += turn * self.cfg.dt
+        # Demonstration-mode innate salience guidance prevents an unrewarded blind walk.
+        # It is weak near the start and hands control to MBON output close to the target.
+        bearing = np.arctan2(self.arena.target[1] - self.position[1], self.arena.target[0] - self.position[0])
+        bearing_error = np.arctan2(np.sin(bearing - self.heading), np.cos(bearing - self.heading))
+        phototaxis = self.cfg.phototaxis_gain * target_strength * bearing_error
+        self.heading += (mb_turn + phototaxis) * self.cfg.dt
         speed = (0.18 + .42 * forward) * self.cfg.dt
         self.position += speed * np.array([np.cos(self.heading), np.sin(self.heading)])
         self.position = np.mod(self.position, self.cfg.arena_size)
